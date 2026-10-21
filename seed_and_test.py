@@ -4,24 +4,16 @@ Project: CSMSS Chh. Shahu College of Engineering (Kanchanwadi) Civic Monitoring 
 Course: Community Involved Project (CIP - 150 Marks)
 
 Description:
-1. Populates `csmss_civic.db` with realistic Kanchanwadi campus zones, users,
-   Chhatrapati Sambhajinagar (`MH20`) student/faculty/bus/ambulance vehicle records,
-   AND 4 pre-analyzed baseline campus incidents so Streamlit Cloud starts with live
-   heatmap pins and KPI counters right out of the box.
-2. Generates 4 high-contrast synthetic test images (`.jpg`) using OpenCV:
-   - Scenario 1: Unlawful car parking inside the Engineering Workshop Fire Exit ROI
-   - Scenario 2: Severe monsoon pothole on the Ayurveda Hospital–Engineering Link Road
-   - Scenario 3: Authorized Faculty vehicle (`MH20EE4512`) entering Main Gate
-   - Scenario 4: Unregistered Outsider vehicle (`MH12XY9999`) flagged at Main Gate
-3. Runs an automated verification suite across both the ML Inference Engine, FastAPI
-   endpoints, and direct Streamlit helper functions.
+Generates realistic CCTV-style synthetic campus frames with telemetry HUD bars,
+perspective road geometry, and vehicle silhouettes, seeds the 5-table SQLite
+database (`csmss_civic.db`), and runs an 8-step verification test suite.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 import cv2
 import numpy as np
@@ -41,50 +33,138 @@ from app import (
 SAMPLE_DIR = DATA_DIR / "samples"
 
 
+def _draw_cctv_frame_base(
+    cam_id: str,
+    zone_label: str,
+    gps_label: str,
+) -> np.ndarray:
+    """Renders a realistic medium-gray asphalt road frame with CCTV telemetry header/footer."""
+    h, w = 480, 640
+    rng = np.random.default_rng(108)
+    img = np.full((h, w, 3), (124, 128, 134), dtype=np.uint8)
+
+    # Subtle asphalt grain texture
+    grain = rng.integers(-8, 8, (h, w, 3), dtype=np.int16)
+    img = np.clip(img.astype(np.int16) + grain, 0, 255).astype(np.uint8)
+
+    # Upper background shoulder / curb
+    cv2.rectangle(img, (0, 0), (w, 76), (92, 98, 106), -1)
+    cv2.line(img, (0, 76), (w, 76), (210, 216, 224), 2, cv2.LINE_AA)
+
+    # Dashed road lane divider
+    for x in range(30, w - 30, 56):
+        cv2.line(img, (x, 240), (x + 28, 240), (215, 220, 228), 2, cv2.LINE_AA)
+
+    # Top CCTV Telemetry HUD Bar
+    cv2.rectangle(img, (0, 0), (w, 30), (15, 23, 42), -1)
+    cv2.putText(
+        img,
+        f"REC // {cam_id}   {zone_label}",
+        (12, 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.44,
+        (226, 232, 240),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        img,
+        gps_label,
+        (w - 195, 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        (148, 163, 184),
+        1,
+        cv2.LINE_AA,
+    )
+
+    # Bottom Telemetry Bar
+    cv2.rectangle(img, (0, h - 24), (w, h), (15, 23, 42), -1)
+    cv2.putText(
+        img,
+        "CSMSS KANCHANWADI CIVIC TELEMETRY  |  FRAME: 640x480  |  FPS: 24.0",
+        (12, h - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.38,
+        (148, 163, 184),
+        1,
+        cv2.LINE_AA,
+    )
+    return img
+
+
+def _draw_vehicle_with_plate(
+    img: np.ndarray,
+    plate_text: str,
+    body_color_bgr: Tuple[int, int, int],
+) -> None:
+    """Draws a structured vehicle silhouette (shadow, chassis, windshield, headlights, number plate)."""
+    # Drop shadow
+    cv2.rectangle(img, (174, 138), (466, 364), (55, 58, 64), -1)
+    # Main vehicle body
+    cv2.rectangle(img, (180, 130), (460, 355), body_color_bgr, -1)
+    cv2.rectangle(img, (180, 130), (460, 355), (30, 35, 42), 2, cv2.LINE_AA)
+    # Roof / Windshield cabin
+    cv2.rectangle(img, (208, 152), (432, 238), (38, 48, 58), -1)
+    cv2.rectangle(img, (208, 152), (432, 238), (150, 165, 180), 1, cv2.LINE_AA)
+    # Front grille & headlights
+    cv2.rectangle(img, (192, 265), (226, 288), (235, 245, 255), -1)
+    cv2.rectangle(img, (414, 265), (448, 288), (235, 245, 255), -1)
+    cv2.rectangle(img, (236, 268), (404, 286), (28, 32, 38), -1)
+
+    # High-contrast Indian RTO Number Plate
+    cv2.rectangle(img, (235, 296), (405, 338), (248, 250, 252), -1)
+    cv2.rectangle(img, (235, 296), (405, 338), (15, 23, 42), 2, cv2.LINE_AA)
+    cv2.putText(
+        img,
+        plate_text,
+        (246, 325),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (15, 23, 42),
+        2,
+        cv2.LINE_AA,
+    )
+
+
 def generate_synthetic_campus_images() -> Dict[str, Path]:
-    """Creates 4 realistic synthetic test images for offline/cloud viva demonstration."""
+    """Creates 4 CCTV-style synthetic campus frames for viva demonstration."""
     SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
     paths: Dict[str, Path] = {}
 
-    # 1. Unlawful Parking inside Restricted Fire Exit Zone (with plate MH20BY1122)
-    img_park = np.full((480, 640, 3), (210, 215, 215), dtype=np.uint8)
-    cv2.rectangle(img_park, (40, 80), (600, 440), (95, 95, 95), -1)
-    cv2.rectangle(img_park, (180, 150), (460, 360), (180, 50, 30), -1)
-    cv2.rectangle(img_park, (205, 175), (435, 335), (25, 25, 25), 3)
-    cv2.rectangle(img_park, (245, 300), (395, 342), (250, 250, 250), -1)
-    cv2.rectangle(img_park, (245, 300), (395, 342), (10, 10, 10), 2)
-    cv2.putText(img_park, "MH20BY1122", (252, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    # 1. Unlawful Parking inside Restricted Fire Exit Zone (MH20BY1122)
+    img_park = _draw_cctv_frame_base(
+        "CAM-02", "ZONE-ENG-FIRE // WORKSHOP FIRE EXIT", "19.8161N 75.2918E"
+    )
+    _draw_vehicle_with_plate(img_park, "MH20BY1122", (65, 78, 112))
     park_path = SAMPLE_DIR / "01_unlawful_parking_MH20BY1122.jpg"
     cv2.imwrite(str(park_path), img_park)
     paths["unlawful_parking"] = park_path
 
     # 2. Severe Road Pothole on Hospital-Engineering Link Road
-    img_pothole = np.full((480, 640, 3), (145, 145, 145), dtype=np.uint8)
-    rng = np.random.default_rng(42)
-    noise = rng.integers(-12, 12, (480, 640, 3), dtype=np.int16)
-    img_pothole = np.clip(img_pothole.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-    cv2.ellipse(img_pothole, (320, 280), (115, 65), 12, 0, 360, (22, 22, 22), -1)
-    cv2.ellipse(img_pothole, (310, 275), (95, 50), 12, 0, 360, (12, 12, 12), -1)
+    img_pothole = _draw_cctv_frame_base(
+        "CAM-03", "ZONE-HOSP-LINK // AYURVEDA HOSPITAL LINK RD", "19.8156N 75.2909E"
+    )
+    cv2.ellipse(img_pothole, (320, 285), (112, 62), 8, 0, 360, (24, 26, 30), -1, cv2.LINE_AA)
+    cv2.ellipse(img_pothole, (315, 282), (90, 46), 8, 0, 360, (12, 14, 16), -1, cv2.LINE_AA)
     pothole_path = SAMPLE_DIR / "02_road_pothole_hospital_link.jpg"
     cv2.imwrite(str(pothole_path), img_pothole)
     paths["road_damage"] = pothole_path
 
     # 3. Authorized Faculty Vehicle at Main Gate (MH20EE4512)
-    img_auth = np.full((480, 640, 3), (190, 200, 195), dtype=np.uint8)
-    cv2.rectangle(img_auth, (140, 120), (500, 390), (60, 90, 140), -1)
-    cv2.rectangle(img_auth, (210, 270), (430, 335), (255, 255, 255), -1)
-    cv2.rectangle(img_auth, (210, 270), (430, 335), (0, 0, 0), 3)
-    cv2.putText(img_auth, "MH20EE4512", (222, 314), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 0, 0), 3)
+    img_auth = _draw_cctv_frame_base(
+        "CAM-01", "ZONE-GATE-01 // CSMSS MAIN ENTRANCE GATE", "19.8168N 75.2912E"
+    )
+    _draw_vehicle_with_plate(img_auth, "MH20EE4512", (88, 70, 52))
     auth_path = SAMPLE_DIR / "03_gate_authorized_MH20EE4512.jpg"
     cv2.imwrite(str(auth_path), img_auth)
     paths["authorized_gate"] = auth_path
 
     # 4. Unregistered Outsider Vehicle at Main Gate (MH12XY9999)
-    img_outsider = np.full((480, 640, 3), (185, 185, 195), dtype=np.uint8)
-    cv2.rectangle(img_outsider, (140, 120), (500, 390), (90, 50, 50), -1)
-    cv2.rectangle(img_outsider, (210, 270), (430, 335), (255, 255, 255), -1)
-    cv2.rectangle(img_outsider, (210, 270), (430, 335), (0, 0, 0), 3)
-    cv2.putText(img_outsider, "MH12XY9999", (222, 314), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 0, 0), 3)
+    img_outsider = _draw_cctv_frame_base(
+        "CAM-01", "ZONE-GATE-01 // CSMSS MAIN ENTRANCE GATE", "19.8168N 75.2912E"
+    )
+    _draw_vehicle_with_plate(img_outsider, "MH12XY9999", (58, 62, 95))
     outsider_path = SAMPLE_DIR / "04_gate_outsider_MH12XY9999.jpg"
     cv2.imwrite(str(outsider_path), img_outsider)
     paths["outsider_gate"] = outsider_path
@@ -94,8 +174,7 @@ def generate_synthetic_campus_images() -> Dict[str, Path]:
 
 def seed_database_and_samples(seed_initial_incidents: bool = True) -> Dict[str, Path]:
     """
-    Seeds users, CSMSS Kanchanwadi zones, vehicle whitelist, and 4 baseline incidents
-    so Streamlit Cloud displays populated KPIs and map markers on initial boot.
+    Seeds users, CSMSS Kanchanwadi zones, vehicle whitelist, and 4 baseline incidents.
     """
     init_db()
     sample_paths = generate_synthetic_campus_images()
@@ -195,7 +274,6 @@ def seed_database_and_samples(seed_initial_incidents: bool = True) -> Dict[str, 
                 v,
             )
 
-        # Also seed initial demo incidents if `incident_reports` is empty
         existing_inc_count = conn.execute("SELECT COUNT(*) FROM incident_reports").fetchone()[0]
         if seed_initial_incidents and existing_inc_count == 0:
             res_park = ml_engine.detect_unlawful_parking(
@@ -289,7 +367,6 @@ def run_end_to_end_verification() -> None:
     sample_paths = seed_database_and_samples(seed_initial_incidents=False)
     client = TestClient(app)
 
-    # 1. Verify Health & Zones (both HTTP and direct Python function calls used by Streamlit)
     r_health = client.get("/api/v1/health")
     assert r_health.status_code == 200, f"Health check failed: {r_health.text}"
     print(f"[PASS] 1. Health Endpoint: {r_health.json()['status']} | Engine: {r_health.json()['ml_engine_mode']}")
@@ -299,7 +376,6 @@ def run_end_to_end_verification() -> None:
     assert len(direct_zones) >= 5 and len(direct_vehicles) >= 6
     print(f"[PASS] 2. Direct Streamlit Calls: {len(direct_zones)} zones & {len(direct_vehicles)} vehicles verified.")
 
-    # 2. Test Module 1: Unlawful Parking Detection at Engineering Fire Exit (Zone 2)
     with open(sample_paths["unlawful_parking"], "rb") as f:
         r_park = client.post(
             "/api/v1/analyze/unlawful_parking",
@@ -319,7 +395,6 @@ def run_end_to_end_verification() -> None:
         f"Severity={park_data['inference']['severity']} | Owner={park_data['registered_vehicle_info']['owner_name']}"
     )
 
-    # 3. Test Module 2: Road Damage (Pothole) Detection on Hospital Link Road (Zone 3)
     with open(sample_paths["road_damage"], "rb") as f:
         r_road = client.post(
             "/api/v1/analyze/road_damage",
@@ -340,7 +415,6 @@ def run_end_to_end_verification() -> None:
         f"Severity={road_data['inference']['severity']}"
     )
 
-    # 4. Test Module 3A: Authorized Faculty Vehicle ANPR at Main Gate (Zone 1)
     with open(sample_paths["authorized_gate"], "rb") as f:
         r_auth = client.post(
             "/api/v1/analyze/unauthorized_vehicle",
@@ -355,7 +429,6 @@ def run_end_to_end_verification() -> None:
         f"Verified {auth_data['registered_vehicle_info']['owner_name']} ({auth_data['registered_vehicle_info']['department']})"
     )
 
-    # 5. Test Module 3B: Unregistered Outsider Vehicle ANPR at Main Gate (Zone 1)
     with open(sample_paths["outsider_gate"], "rb") as f:
         r_out = client.post(
             "/api/v1/analyze/unauthorized_vehicle",
@@ -370,7 +443,6 @@ def run_end_to_end_verification() -> None:
         f"Flagged as UNREGISTERED OUTSIDER (Severity={out_data['inference']['severity']})"
     )
 
-    # 6. Test Admin Resolution Workflow
     r_resolve = client.patch(
         f"/api/v1/incidents/{park_data['incident_id']}/resolve",
         json={
@@ -381,7 +453,6 @@ def run_end_to_end_verification() -> None:
     assert r_resolve.status_code == 200 and r_resolve.json()["status"] == "Resolved"
     print(f"[PASS] 7. Admin Resolution Workflow: Incident #{park_data['incident_id']} marked Resolved.")
 
-    # 7. Verify Direct `list_incidents()` and `get_campus_analytics()` calls (as invoked by Streamlit)
     direct_incidents = list_incidents()
     stats = get_campus_analytics()
     assert len(direct_incidents) >= 4
