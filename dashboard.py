@@ -4,20 +4,10 @@ Project: CSMSS Chh. Shahu College of Engineering (Kanchanwadi) Civic Monitoring 
 Course: Community Involved Project (CIP - 150 Marks)
 
 Description:
-Streamlit interactive web application providing two role-based operational views:
-  1. Student / Faculty Community Reporter Portal:
-     - Upload or capture photos of unlawful parking or campus potholes
-     - Instant YOLOv8/OpenCV visual bounding-box feedback & severity grading
-     - Live status tracker for submitted campus civic complaints
-  2. Campus Security & Estate Office Command Center:
-     - Interactive CSMSS Kanchanwadi geospatial heatmap (OpenStreetMap / PyDeck)
-     - Real-time Main Gate ANPR license plate scanner & whitelist verifier
-     - Admin resolution queue with one-click status updates & CSV audit export
-
-Zero-Cost Resilience:
-Operates seamlessly either via the FastAPI REST server (`http://localhost:8000`) OR
-directly against the local SQLite database and `CSMSSInferenceEngine` in standalone mode,
-so you only need a single terminal command (`streamlit run dashboard.py`) during your viva.
+Streamlit interactive web application providing three role-based operational views:
+  1. Student / Faculty Community Reporter Portal
+  2. Campus Security & Estate Office Command Center
+  3. Main Gate ANPR & Vehicle Whitelist Registry
 """
 
 from __future__ import annotations
@@ -25,17 +15,17 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import cv2
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 from app import (
     DATA_DIR,
     UPLOAD_DIR,
+    IncidentStatusUpdate,
+    VehicleCreateRequest,
+    get_campus_analytics,
     get_db,
     get_zone_or_default,
     init_db,
@@ -44,12 +34,9 @@ from app import (
     list_registered_vehicles,
     lookup_vehicle,
     ml_engine,
+    register_new_vehicle,
     update_incident_status,
     verify_vehicle_plate,
-    IncidentStatusUpdate,
-    VehicleCreateRequest,
-    register_new_vehicle,
-    get_campus_analytics,
 )
 
 st.set_page_config(
@@ -61,14 +48,15 @@ st.set_page_config(
 
 
 def ensure_seeded() -> None:
-    """Automatically initializes and seeds the SQLite database if empty."""
+    """Automatically initializes and seeds the SQLite database & baseline incidents if empty."""
     init_db()
     zones = list_campus_zones()
-    if not zones:
+    incidents = list_incidents()
+    if not zones or not incidents:
         try:
             from seed_and_test import seed_database_and_samples
 
-            seed_database_and_samples()
+            seed_database_and_samples(seed_initial_incidents=True)
         except Exception as exc:
             st.warning(f"Database initialization note: {exc}")
 
@@ -385,7 +373,7 @@ elif persona_mode == "🚨 Security & Estate Command Center":
                 )
 
             if os.path.exists(active_inc["image_path"]):
-                st.image(active_inc["image_path"], width=460)
+                st.image(active_inc["image_path"], use_container_width=True)
 
             new_status = st.selectbox(
                 "Update Workflow Status:",
