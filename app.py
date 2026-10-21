@@ -11,10 +11,8 @@ FastAPI backend implementing the 5-table SQLite relational schema:
   - `incident_reports`: Master geo-tagged civic & security incident log
   - `road_damage_logs`: Pothole & surface fracture maintenance extension records
 
-Exposes REST API endpoints (with interactive Swagger UI at `/docs`) for:
-  - Automated image analysis (Unlawful Parking, Road Damage, Gate ANPR)
-  - License plate whitelist lookup (`GET /api/v1/vehicles/verify/{plate_number}`)
-  - Geo-tagged incident querying, heatmap metrics, and Admin resolution workflow
+Exposes REST API endpoints (with interactive Swagger UI at `/docs`) and direct
+Python functions for `dashboard.py` (Streamlit Cloud compatible).
 """
 
 from __future__ import annotations
@@ -28,13 +26,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from inference import CSMSSInferenceEngine
 
-# Configurable storage directory (supports zero-cost local execution)
+# Configurable storage directory (uses /tmp fallback if current mount is read-only)
 DATA_DIR = Path(os.environ.get("CSMSS_DATA_DIR", "./data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 ANNOTATED_DIR = DATA_DIR / "annotated"
@@ -52,7 +50,7 @@ app = FastAPI(
         "Zero-Cost AI Civic & Security Monitoring Backend for CSMSS Chh. Shahu College "
         "of Engineering, Kanchanwadi, Chhatrapati Sambhajinagar (CIP 150-Mark Project)."
     ),
-    version="1.0.0",
+    version="1.0.1",
 )
 
 app.add_middleware(
@@ -136,9 +134,9 @@ CREATE TABLE IF NOT EXISTS road_damage_logs (
 
 
 def _open_sqlite_conn() -> sqlite3.Connection:
-    """Opens SQLite connection with portable journal settings for local/USB/WSL filesystems."""
+    """Opens SQLite connection with portable journal settings for local and cloud containers."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = MEMORY;")
@@ -190,7 +188,7 @@ class VehicleCreateRequest(BaseModel):
 # -----------------------------------------------------------------------------
 def lookup_vehicle(conn: sqlite3.Connection, plate_number: Optional[str]) -> Optional[Dict[str, Any]]:
     """Checks if a normalized license plate exists in `registered_vehicles`."""
-    if not plate_number:
+    if not plate_number or not isinstance(plate_number, str):
         return None
     norm = CSMSSInferenceEngine.normalize_indian_plate(plate_number) or plate_number.upper().strip()
     cur = conn.execute(
@@ -203,7 +201,7 @@ def lookup_vehicle(conn: sqlite3.Connection, plate_number: Optional[str]) -> Opt
 
 def get_zone_or_default(conn: sqlite3.Connection, zone_id: int) -> Dict[str, Any]:
     """Fetches a campus zone by ID or returns the first available CSMSS zone."""
-    cur = conn.execute("SELECT * FROM campus_zones WHERE zone_id = ?", (zone_id,))
+    cur = conn.execute("SELECT * FROM campus_zones WHERE zone_id = ?", (int(zone_id),))
     row = cur.fetchone()
     if row:
         return dict(row)
@@ -215,7 +213,7 @@ def get_zone_or_default(conn: sqlite3.Connection, zone_id: int) -> Dict[str, Any
 
 
 # -----------------------------------------------------------------------------
-# REST API Endpoints
+# REST API Endpoints (Also directly callable from Streamlit `dashboard.py`)
 # -----------------------------------------------------------------------------
 @app.on_event("startup")
 def on_startup() -> None:
@@ -243,15 +241,17 @@ def list_campus_zones() -> List[Dict[str, Any]]:
 
 
 @app.get("/api/v1/vehicles")
-def list_registered_vehicles(
-    role: Optional[str] = Query(None, description="Filter by owner_role (student, faculty, etc.)"),
-) -> List[Dict[str, Any]]:
-    """Returns whitelisted CSMSS vehicles."""
+def list_registered_vehicles(role: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Returns whitelisted CSMSS vehicles.
+    Uses plain `None` default so it works both as a FastAPI route and direct Python call in Streamlit.
+    """
+    clean_role = role if isinstance(role, str) and role.strip() else None
     with get_db() as conn:
-        if role:
+        if clean_role:
             rows = conn.execute(
                 "SELECT * FROM registered_vehicles WHERE owner_role = ? ORDER BY vehicle_id DESC",
-                (role,),
+                (clean_role,),
             ).fetchall()
         else:
             rows = conn.execute("SELECT * FROM registered_vehicles ORDER BY vehicle_id DESC").fetchall()
@@ -291,7 +291,7 @@ def verify_vehicle_plate(plate_number: str) -> Dict[str, Any]:
     """Cross-references a license plate against the authorized CSMSS vehicle registry."""
     with get_db() as conn:
         record = lookup_vehicle(conn, plate_number)
-        norm = CSMSSInferenceEngine.normalize_indian_plate(plate_number) or plate_number.upper()
+        norm = CSMSSInferenceEngine.normalize_indian_plate(plate_number) or plate_number.upper().strip()
         if record:
             return {
                 "plate_number": norm,
@@ -354,7 +354,6 @@ async def analyze_and_log_incident(
                 hint_plate=hint_plate,
             )
 
-        # Check plate authorization if a plate was detected
         vehicle_record = lookup_vehicle(conn, res.detected_plate)
         is_authorized: Optional[bool] = None
         if res.detected_plate:
@@ -398,7 +397,6 @@ async def analyze_and_log_incident(
         )
         incident_id = cur.lastrowid
 
-        # If road_damage, also populate specialized `road_damage_logs` table
         if incident_type == "road_damage":
             conn.execute(
                 """
@@ -428,14 +426,15 @@ async def analyze_and_log_incident(
 
 @app.get("/api/v1/incidents")
 def list_incidents(
-    incident_type: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    severity: Optional[str] = Query(None),
-    zone_id: Optional[int] = Query(None),
+    incident_type: Optional[str] = None,
+    status: Optional[str] = None,
+    severity: Optional[str] = None,
+    zone_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Queries geo-tagged campus incidents joined with zone coordinates, reporter details,
     registered vehicle lookup, and optional road damage metrics.
+    Uses plain `None` defaults so direct calls from Streamlit `dashboard.py` never pass FastAPI Query objects.
     """
     query = """
         SELECT
@@ -461,16 +460,16 @@ def list_incidents(
         WHERE 1=1
     """
     params: List[Any] = []
-    if incident_type:
+    if isinstance(incident_type, str) and incident_type.strip():
         query += " AND ir.incident_type = ?"
-        params.append(incident_type)
-    if status:
+        params.append(incident_type.strip())
+    if isinstance(status, str) and status.strip():
         query += " AND ir.status = ?"
-        params.append(status)
-    if severity:
+        params.append(status.strip())
+    if isinstance(severity, str) and severity.strip():
         query += " AND ir.severity = ?"
-        params.append(severity)
-    if zone_id:
+        params.append(severity.strip())
+    if isinstance(zone_id, int):
         query += " AND ir.zone_id = ?"
         params.append(zone_id)
 
@@ -492,13 +491,13 @@ def update_incident_status(incident_id: int, payload: IncidentStatusUpdate) -> D
             SET status = ?, resolution_notes = ?, resolved_at = COALESCE(?, resolved_at)
             WHERE incident_id = ?
             """,
-            (payload.status, payload.resolution_notes, resolved_ts, incident_id),
+            (payload.status, payload.resolution_notes, resolved_ts, int(incident_id)),
         )
         conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"Incident #{incident_id} not found.")
         updated = conn.execute(
-            "SELECT * FROM incident_reports WHERE incident_id = ?", (incident_id,)
+            "SELECT * FROM incident_reports WHERE incident_id = ?", (int(incident_id),)
         ).fetchone()
         return dict(updated)
 
