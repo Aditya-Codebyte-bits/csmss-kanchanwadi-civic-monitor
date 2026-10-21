@@ -4,47 +4,53 @@ Project: CSMSS Chh. Shahu College of Engineering (Kanchanwadi) Civic Monitoring 
 Course: Community Involved Project (CIP - 150 Marks)
 
 Description:
-1. Populates `csmss_civic.db` with realistic Kanchanwadi campus zones, users, and
-   Chhatrapati Sambhajinagar (`MH20`) student/faculty/bus/ambulance vehicle records.
-2. Generates 4 high-contrast synthetic test images (`.jpg`) using OpenCV so you have
-   ready-to-demo visual scenarios right out of the box:
+1. Populates `csmss_civic.db` with realistic Kanchanwadi campus zones, users,
+   Chhatrapati Sambhajinagar (`MH20`) student/faculty/bus/ambulance vehicle records,
+   AND 4 pre-analyzed baseline campus incidents so Streamlit Cloud starts with live
+   heatmap pins and KPI counters right out of the box.
+2. Generates 4 high-contrast synthetic test images (`.jpg`) using OpenCV:
    - Scenario 1: Unlawful car parking inside the Engineering Workshop Fire Exit ROI
    - Scenario 2: Severe monsoon pothole on the Ayurveda Hospital–Engineering Link Road
    - Scenario 3: Authorized Faculty vehicle (`MH20EE4512`) entering Main Gate
    - Scenario 4: Unregistered Outsider vehicle (`MH12XY9999`) flagged at Main Gate
-3. Runs an automated verification suite across both the ML Inference Engine and the
-   FastAPI REST endpoints (`TestClient`) to guarantee everything works before your viva.
+3. Runs an automated verification suite across both the ML Inference Engine, FastAPI
+   endpoints, and direct Streamlit helper functions.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 import cv2
 import numpy as np
-from fastapi.testclient import TestClient
 
-from app import DATA_DIR, app, get_db, init_db
+from app import (
+    DATA_DIR,
+    app,
+    get_campus_analytics,
+    get_db,
+    init_db,
+    list_campus_zones,
+    list_incidents,
+    list_registered_vehicles,
+    ml_engine,
+)
 
 SAMPLE_DIR = DATA_DIR / "samples"
 
 
 def generate_synthetic_campus_images() -> Dict[str, Path]:
-    """Creates 4 realistic synthetic test images for offline viva demonstration."""
+    """Creates 4 realistic synthetic test images for offline/cloud viva demonstration."""
     SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
     paths: Dict[str, Path] = {}
 
     # 1. Unlawful Parking inside Restricted Fire Exit Zone (with plate MH20BY1122)
     img_park = np.full((480, 640, 3), (210, 215, 215), dtype=np.uint8)
-    # Road asphalt background
     cv2.rectangle(img_park, (40, 80), (600, 440), (95, 95, 95), -1)
-    # Draw distinct vehicle silhouette inside the central ROI
     cv2.rectangle(img_park, (180, 150), (460, 360), (180, 50, 30), -1)
     cv2.rectangle(img_park, (205, 175), (435, 335), (25, 25, 25), 3)
-    # High-contrast license plate rectangle on vehicle bumper
     cv2.rectangle(img_park, (245, 300), (395, 342), (250, 250, 250), -1)
     cv2.rectangle(img_park, (245, 300), (395, 342), (10, 10, 10), 2)
     cv2.putText(img_park, "MH20BY1122", (252, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
@@ -54,10 +60,9 @@ def generate_synthetic_campus_images() -> Dict[str, Path]:
 
     # 2. Severe Road Pothole on Hospital-Engineering Link Road
     img_pothole = np.full((480, 640, 3), (145, 145, 145), dtype=np.uint8)
-    # Simulate textured gray asphalt surface
-    noise = np.random.randint(-12, 12, (480, 640, 3), dtype=np.int16)
+    rng = np.random.default_rng(42)
+    noise = rng.integers(-12, 12, (480, 640, 3), dtype=np.int16)
     img_pothole = np.clip(img_pothole.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-    # Draw dark irregular pothole cavity in the road center
     cv2.ellipse(img_pothole, (320, 280), (115, 65), 12, 0, 360, (22, 22, 22), -1)
     cv2.ellipse(img_pothole, (310, 275), (95, 50), 12, 0, 360, (12, 12, 12), -1)
     pothole_path = SAMPLE_DIR / "02_road_pothole_hospital_link.jpg"
@@ -87,8 +92,11 @@ def generate_synthetic_campus_images() -> Dict[str, Path]:
     return paths
 
 
-def seed_database_and_samples() -> Dict[str, Path]:
-    """Seeds users, CSMSS Kanchanwadi zones, vehicle whitelist, and initial incidents."""
+def seed_database_and_samples(seed_initial_incidents: bool = True) -> Dict[str, Path]:
+    """
+    Seeds users, CSMSS Kanchanwadi zones, vehicle whitelist, and 4 baseline incidents
+    so Streamlit Cloud displays populated KPIs and map markers on initial boot.
+    """
     init_db()
     sample_paths = generate_synthetic_campus_images()
 
@@ -100,7 +108,6 @@ def seed_database_and_samples() -> Dict[str, Path]:
         ("Dr. Admin Coordinator", "admin", "CSMSS-ADM-001", "9422711220"),
     ]
 
-    # Real GPS coordinates around CSMSS Chh. Shahu College of Engineering, Kanchanwadi
     zones_seed = [
         (
             "ZONE-GATE-01",
@@ -187,28 +194,110 @@ def seed_database_and_samples() -> Dict[str, Path]:
                 """,
                 v,
             )
+
+        # Also seed initial demo incidents if `incident_reports` is empty
+        existing_inc_count = conn.execute("SELECT COUNT(*) FROM incident_reports").fetchone()[0]
+        if seed_initial_incidents and existing_inc_count == 0:
+            res_park = ml_engine.detect_unlawful_parking(
+                str(sample_paths["unlawful_parking"]),
+                roi_normalized=(0.12, 0.18, 0.88, 0.86),
+                zone_criticality=1.8,
+                hint_plate="MH20BY1122",
+            )
+            conn.execute(
+                """
+                INSERT INTO incident_reports
+                (incident_type, zone_id, reported_by_user_id, detected_plate, is_authorized_vehicle,
+                 confidence_score, severity, status, image_path, description, resolution_notes)
+                VALUES ('unlawful_parking', 2, 1, 'MH20BY1122', 1, ?, ?, 'Resolved', ?, ?,
+                        'Security guard contacted student owner (Aarav Kulkarni); vehicle moved within 8 mins.')
+                """,
+                (res_park.confidence, res_park.severity, res_park.annotated_image_path, res_park.summary),
+            )
+
+            res_road = ml_engine.detect_road_damage(
+                str(sample_paths["road_damage"]),
+                zone_criticality=2.0,
+            )
+            cur_road = conn.execute(
+                """
+                INSERT INTO incident_reports
+                (incident_type, zone_id, reported_by_user_id, detected_plate, is_authorized_vehicle,
+                 confidence_score, severity, status, image_path, description)
+                VALUES ('road_damage', 3, 2, NULL, NULL, ?, ?, 'Open', ?, ?)
+                """,
+                (res_road.confidence, res_road.severity, res_road.annotated_image_path, res_road.summary),
+            )
+            conn.execute(
+                """
+                INSERT INTO road_damage_logs
+                (incident_id, defect_category, bbox_area_ratio, estimated_diameter_cm, recommended_action)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    cur_road.lastrowid,
+                    res_road.defect_category or "Pothole",
+                    res_road.bbox_area_ratio,
+                    res_road.estimated_diameter_cm,
+                    res_road.recommended_action or "Immediate cold-mix asphalt patching required.",
+                ),
+            )
+
+            res_auth = ml_engine.extract_license_plate(
+                str(sample_paths["authorized_gate"]),
+                hint_plate="MH20EE4512",
+            )
+            conn.execute(
+                """
+                INSERT INTO incident_reports
+                (incident_type, zone_id, reported_by_user_id, detected_plate, is_authorized_vehicle,
+                 confidence_score, severity, status, image_path, description)
+                VALUES ('unauthorized_vehicle', 1, 3, 'MH20EE4512', 1, ?, 'Low', 'Open', ?,
+                        'Authorized faculty vehicle (MH20EE4512) owned by Prof. S. B. Deshmukh (CSE).')
+                """,
+                (res_auth.confidence, res_auth.annotated_image_path),
+            )
+
+            res_out = ml_engine.extract_license_plate(
+                str(sample_paths["outsider_gate"]),
+                hint_plate="MH12XY9999",
+            )
+            conn.execute(
+                """
+                INSERT INTO incident_reports
+                (incident_type, zone_id, reported_by_user_id, detected_plate, is_authorized_vehicle,
+                 confidence_score, severity, status, image_path, description)
+                VALUES ('unauthorized_vehicle', 1, 3, 'MH12XY9999', 0, ?, 'Critical', 'Open', ?,
+                        'ALERT: Unregistered outsider vehicle (MH12XY9999) detected at CSMSS Main Entrance Gate.')
+                """,
+                (res_out.confidence, res_out.annotated_image_path),
+            )
+
         conn.commit()
 
     return sample_paths
 
 
 def run_end_to_end_verification() -> None:
-    """Executes automated tests across all 3 functional modules via FastAPI TestClient."""
+    """Executes automated tests across both direct Streamlit calls and FastAPI TestClient."""
+    from fastapi.testclient import TestClient
+
     print("=" * 78)
     print("CSMSS CIVIC MONITOR - SEEDING & END-TO-END VERIFICATION SUITE")
     print("=" * 78)
 
-    sample_paths = seed_database_and_samples()
+    sample_paths = seed_database_and_samples(seed_initial_incidents=False)
     client = TestClient(app)
 
-    # 1. Verify Health & Zones
+    # 1. Verify Health & Zones (both HTTP and direct Python function calls used by Streamlit)
     r_health = client.get("/api/v1/health")
     assert r_health.status_code == 200, f"Health check failed: {r_health.text}"
     print(f"[PASS] 1. Health Endpoint: {r_health.json()['status']} | Engine: {r_health.json()['ml_engine_mode']}")
 
-    r_zones = client.get("/api/v1/zones")
-    assert r_zones.status_code == 200 and len(r_zones.json()) >= 5
-    print(f"[PASS] 2. Campus Zones Seeded: {len(r_zones.json())} Kanchanwadi zones active.")
+    direct_zones = list_campus_zones()
+    direct_vehicles = list_registered_vehicles()
+    assert len(direct_zones) >= 5 and len(direct_vehicles) >= 6
+    print(f"[PASS] 2. Direct Streamlit Calls: {len(direct_zones)} zones & {len(direct_vehicles)} vehicles verified.")
 
     # 2. Test Module 1: Unlawful Parking Detection at Engineering Fire Exit (Zone 2)
     with open(sample_paths["unlawful_parking"], "rb") as f:
@@ -292,12 +381,12 @@ def run_end_to_end_verification() -> None:
     assert r_resolve.status_code == 200 and r_resolve.json()["status"] == "Resolved"
     print(f"[PASS] 7. Admin Resolution Workflow: Incident #{park_data['incident_id']} marked Resolved.")
 
-    # 7. Verify Analytics Summary
-    r_stats = client.get("/api/v1/analytics/summary")
-    assert r_stats.status_code == 200
-    stats = r_stats.json()
+    # 7. Verify Direct `list_incidents()` and `get_campus_analytics()` calls (as invoked by Streamlit)
+    direct_incidents = list_incidents()
+    stats = get_campus_analytics()
+    assert len(direct_incidents) >= 4
     print(
-        f"[PASS] 8. Analytics Summary: Total={stats['total_incidents']}, "
+        f"[PASS] 8. Direct Streamlit Incident & Analytics Queries: Total={stats['total_incidents']}, "
         f"Open={stats['active_open_incidents']}, Resolved={stats['resolved_incidents']}, "
         f"Outsiders={stats['unauthorized_outsider_flags']}"
     )
