@@ -1,13 +1,14 @@
 """
-Module 3: Dual-Mode Frontend Application (dashboard.py)
+Module 3: Minimal Technical Frontend Console (dashboard.py)
 Project: CSMSS Chh. Shahu College of Engineering (Kanchanwadi) Civic Monitoring System
 Course: Community Involved Project (CIP - 150 Marks)
 
 Description:
-Streamlit interactive web application providing three role-based operational views:
-  1. Student / Faculty Community Reporter Portal
-  2. Campus Security & Estate Office Command Center
-  3. Main Gate ANPR & Vehicle Whitelist Registry
+Engineered with a minimal, technical telemetry aesthetic (Linear / Palantir style):
+  - Full-width layout (`initial_sidebar_state="collapsed"`) so mobile & laptop screens
+    never suffer from cramped multi-column text wrapping.
+  - Monospace telemetry bar, bordered KPI cards, clean top horizontal tabs, and
+    calibrated geospatial markers (`size=12`).
 """
 
 from __future__ import annotations
@@ -40,11 +41,149 @@ from app import (
 )
 
 st.set_page_config(
-    page_title="CSMSS Kanchanwadi Civic Monitor",
-    page_icon="🛡️",
+    page_title="CSMSS // Civic Telemetry Console",
+    page_icon="▪",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
+
+# -----------------------------------------------------------------------------
+# Minimal Technical CSS Design System
+# -----------------------------------------------------------------------------
+TECHNICAL_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+code, pre, .mono {
+    font-family: 'JetBrains Mono', monospace !important;
+}
+
+/* Remove excessive default top padding */
+.block-container {
+    padding-top: 1.5rem !important;
+    padding-bottom: 2.5rem !important;
+    max-width: 1280px !important;
+}
+
+/* Technical top Masthead */
+.tech-header {
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.03) 0%, rgba(15, 23, 42, 0.08) 100%);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+}
+
+.tech-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #475569;
+    margin-bottom: 4px;
+}
+
+.tech-title {
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0;
+    line-height: 1.3;
+}
+
+.tech-subtitle {
+    font-size: 0.82rem;
+    color: #64748b;
+    margin-top: 4px;
+}
+
+/* Minimal KPI Telemetry Strip */
+.kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 18px;
+}
+
+.kpi-card {
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 6px;
+    padding: 10px 14px;
+    background: rgba(248, 250, 252, 0.5);
+}
+
+.kpi-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748b;
+}
+
+.kpi-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.35rem;
+    font-weight: 600;
+    margin-top: 2px;
+}
+
+/* Section Headers */
+.sec-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.74rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #334155;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+    padding-bottom: 6px;
+    margin-bottom: 12px;
+    margin-top: 8px;
+}
+
+/* Status Pills */
+.status-pill {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+/* Override loud default coral buttons with sleek slate-navy */
+div.stButton > button[kind="primary"] {
+    background-color: #0f172a !important;
+    color: #f8fafc !important;
+    border: 1px solid #1e293b !important;
+    border-radius: 6px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.80rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.03em !important;
+    padding: 0.5rem 1rem !important;
+}
+
+div.stButton > button[kind="primary"]:hover {
+    background-color: #1e293b !important;
+    border-color: #334155 !important;
+}
+
+/* Clean Tabs */
+button[data-baseweb="tab"] {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.76rem !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
+}
+</style>
+"""
+st.markdown(TECHNICAL_CSS, unsafe_allow_html=True)
 
 
 def ensure_seeded() -> None:
@@ -108,17 +247,17 @@ def run_direct_analysis(
                 if not is_authorized:
                     res.severity = "Critical" if crit_weight >= 1.5 else "High"
                     res.summary = (
-                        f"ALERT: Unregistered outsider vehicle ({res.detected_plate}) "
-                        f"flagged at {zone['zone_name']}."
+                        f"UNREGISTERED_OUTSIDER ({res.detected_plate}) "
+                        f"flagged at {zone['zone_code']}."
                     )
                 else:
                     res.severity = "Low"
                     res.summary = (
-                        f"Authorized {vehicle_record['owner_role']} vehicle ({res.detected_plate}) "
-                        f"- {vehicle_record['owner_name']} ({vehicle_record['department']})."
+                        f"AUTHORIZED ({res.detected_plate}) // "
+                        f"{vehicle_record['owner_name']} [{vehicle_record['department']}]."
                     )
 
-        desc = f"{res.summary} | Note: {user_notes}" if user_notes else res.summary
+        desc = f"{res.summary} | NOTE: {user_notes}" if user_notes else res.summary
         cur = conn.execute(
             """
             INSERT INTO incident_reports
@@ -167,70 +306,91 @@ def run_direct_analysis(
 
 
 # -----------------------------------------------------------------------------
-# Main UI Layout
+# Initialize State & Top Telemetry Masthead
 # -----------------------------------------------------------------------------
 ensure_seeded()
-
-st.sidebar.title("🛡️ CSMSS Civic Monitor")
-st.sidebar.caption("CSMSS Chh. Shahu College of Engineering, Kanchanwadi, Chhatrapati Sambhajinagar")
-
-persona_mode = st.sidebar.radio(
-    "Select Operating Persona:",
-    options=[
-        "🎓 Student / Staff Civic Reporter",
-        "🚨 Security & Estate Command Center",
-        "🚗 Gate ANPR & Vehicle Registry",
-    ],
-)
-
 zones_list = list_campus_zones()
-zone_map = {f"{z['zone_name']} ({z['zone_code']})": z for z in zones_list}
+zone_map = {f"{z['zone_code']} — {z['zone_name']}": z for z in zones_list}
 analytics = get_campus_analytics()
 
-st.sidebar.markdown("### Campus Live Pulse")
-col_s1, col_s2 = st.sidebar.columns(2)
-col_s1.metric("Open Issues", analytics["active_open_incidents"])
-col_s2.metric("Resolved", analytics["resolved_incidents"])
-st.sidebar.metric("Outsider Flags", analytics["unauthorized_outsider_flags"])
-st.sidebar.info(f"ML Engine: `{ml_engine.engine_mode}` (Zero-Cost CPU Mode)")
+st.markdown(
+    f"""
+    <div class="tech-header">
+        <div class="tech-eyebrow">
+            SYS_STATUS: ONLINE &nbsp;|&nbsp; ENGINE: {ml_engine.engine_mode.upper()} &nbsp;|&nbsp; LOC: 19.8162°N 75.2914°E
+        </div>
+        <div class="tech-title">CSMSS KANCHANWADI // CIVIC &amp; ANPR TELEMETRY CONSOLE</div>
+        <div class="tech-subtitle">
+            Chh. Shahu College of Engineering • Automated Unlawful Parking, Road Surface Defect &amp; Gate Access Auditing
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
+st.markdown(
+    f"""
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <div class="kpi-label">TOTAL LOGGED EVENTS</div>
+            <div class="kpi-val">{analytics['total_incidents']}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">ACTIVE / OPEN QUEUE</div>
+            <div class="kpi-val">{analytics['active_open_incidents']}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">RESOLVED &amp; VERIFIED</div>
+            <div class="kpi-val">{analytics['resolved_incidents']}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">OUTSIDER ANPR FLAGS</div>
+            <div class="kpi-val">{analytics['unauthorized_outsider_flags']}</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Use clean horizontal tabs instead of a wide sidebar so mobile screens have 100% width
+tab_infer, tab_command, tab_anpr = st.tabs(
+    [
+        "01 // CV INFERENCE & REPORTING",
+        "02 // GEOSPATIAL OPS & TRIAGE",
+        "03 // ANPR REGISTRY & WHITELIST",
+    ]
+)
 
 # =============================================================================
-# VIEW 1: STUDENT / STAFF COMMUNITY REPORTER PORTAL
+# TAB 1: CV INFERENCE & INCIDENT LOGGING
 # =============================================================================
-if persona_mode == "🎓 Student / Staff Civic Reporter":
-    st.title("🎓 CSMSS Community Civic Reporting Portal")
-    st.write(
-        "Report **Unlawful Vehicle Parking** or **Internal Road Damage (Potholes/Cracks)** across "
-        "the Kanchanwadi campus. Uploaded images are automatically analyzed and geo-tagged for the "
-        "Campus Security Officer or Civil Maintenance Cell."
-    )
-
-    col_form, col_preview = st.columns([1.1, 1.0], gap="large")
+with tab_infer:
+    col_form, col_preview = st.columns([1.0, 1.15], gap="medium")
 
     with col_form:
-        st.subheader("1. Submit New Campus Incident")
+        st.markdown('<div class="sec-label">01.A // INPUT PARAMETERS &amp; TELEMETRY SOURCE</div>', unsafe_allow_html=True)
+
         selected_task_label = st.selectbox(
-            "Issue Category",
+            "Detection Pipeline",
             options=[
-                "Unlawful Parking (Walkway / Fire Exit / Link Road Obstruction)",
-                "Road Surface Damage (Pothole / Monsoon Crack / Waterlogging)",
-                "Suspicious / Unregistered Outsider Vehicle (ANPR Audit)",
+                "UNLAWFUL_PARKING // Restricted ROI Intersection",
+                "ROAD_DAMAGE // Surface Cavity & Crack Analysis",
+                "UNAUTHORIZED_VEHICLE // Gate ANPR & Whitelist Audit",
             ],
         )
         task_map = {
-            "Unlawful Parking (Walkway / Fire Exit / Link Road Obstruction)": "unlawful_parking",
-            "Road Surface Damage (Pothole / Monsoon Crack / Waterlogging)": "road_damage",
-            "Suspicious / Unregistered Outsider Vehicle (ANPR Audit)": "unauthorized_vehicle",
+            "UNLAWFUL_PARKING // Restricted ROI Intersection": "unlawful_parking",
+            "ROAD_DAMAGE // Surface Cavity & Crack Analysis": "road_damage",
+            "UNAUTHORIZED_VEHICLE // Gate ANPR & Whitelist Audit": "unauthorized_vehicle",
         }
         chosen_task = task_map[selected_task_label]
 
-        selected_zone_label = st.selectbox("CSMSS Kanchanwadi Campus Location", options=list(zone_map.keys()))
+        selected_zone_label = st.selectbox("Campus Sector / Zone", options=list(zone_map.keys()))
         chosen_zone = zone_map[selected_zone_label]
 
         input_source = st.radio(
-            "Image Input Source (Viva Demo Switch):",
-            options=["Use Pre-Loaded CSMSS Test Sample", "Upload Photo / Live Camera Capture"],
+            "Frame Source",
+            options=["Pre-Loaded Kanchanwadi CCTV Frame", "Custom Image Upload"],
             horizontal=True,
         )
 
@@ -239,33 +399,39 @@ if persona_mode == "🎓 Student / Staff Civic Reporter":
         chosen_bytes: Optional[bytes] = None
         chosen_filename: str = "capture.jpg"
 
-        if input_source == "Use Pre-Loaded CSMSS Test Sample" and sample_files:
+        if input_source == "Pre-Loaded Kanchanwadi CCTV Frame" and sample_files:
             sample_names = [p.name for p in sample_files]
-            picked_sample = st.selectbox("Select Kanchanwadi Synthetic Test Case:", options=sample_names)
+            picked_sample = st.selectbox("Select Test Frame", options=sample_names)
             sample_path = sample_dir / picked_sample
             chosen_bytes = sample_path.read_bytes()
             chosen_filename = picked_sample
         else:
-            up_file = st.file_uploader("Upload JPG/PNG frame from phone or webcam", type=["jpg", "jpeg", "png"])
+            up_file = st.file_uploader("Upload Frame (JPG/PNG)", type=["jpg", "jpeg", "png"])
             if up_file is not None:
                 chosen_bytes = up_file.getvalue()
                 chosen_filename = up_file.name
 
-        optional_plate_hint = st.text_input(
-            "Optional Plate Hint (if visible in blurry mobile photo, e.g., MH20EE4512):",
-            value="",
-        )
-        reporter_notes = st.text_area(
-            "Additional Landmark Details:",
-            placeholder="e.g., Blocking ambulance bay near Ayurveda Hospital link gate...",
-        )
+        c_p1, c_p2 = st.columns(2)
+        with c_p1:
+            optional_plate_hint = st.text_input(
+                "Manual OCR Override (Optional)",
+                value="",
+                placeholder="e.g. MH20EE4512",
+            )
+        with c_p2:
+            reporter_notes = st.text_input(
+                "Field Operator Log Note",
+                value="",
+                placeholder="e.g. Blocking emergency lane",
+            )
 
-        submit_btn = st.button("🔍 Run AI Detection & Log Incident", type="primary", use_container_width=True)
+        submit_btn = st.button("EXECUTE CV PIPELINE & COMMIT LOG", type="primary", use_container_width=True)
 
     with col_preview:
-        st.subheader("2. Automated AI Inspection Output")
+        st.markdown('<div class="sec-label">01.B // ANNOTATED COMPUTER VISION OUTPUT</div>', unsafe_allow_html=True)
+
         if submit_btn and chosen_bytes:
-            with st.spinner("Running YOLOv8 / OpenCV Computer Vision pipeline..."):
+            with st.spinner("Executing inference pipeline..."):
                 outcome = run_direct_analysis(
                     incident_type=chosen_task,
                     zone_id=chosen_zone["zone_id"],
@@ -276,146 +442,159 @@ if persona_mode == "🎓 Student / Staff Civic Reporter":
                     user_notes=reporter_notes.strip() or None,
                 )
                 inf = outcome["inference"]
-                st.success(f"Incident #{outcome['incident_id']} logged at **{chosen_zone['zone_name']}**!")
-
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Severity Level", inf["severity"])
-                m2.metric("AI Confidence", f"{int(inf['confidence'] * 100)}%")
-                m3.metric("Plate Extracted", inf["detected_plate"] or "N/A")
 
                 if os.path.exists(inf["annotated_image_path"]):
-                    st.image(
-                        inf["annotated_image_path"],
-                        caption=f"Annotated Output: {inf['summary']}",
-                        use_container_width=True,
-                    )
+                    st.image(inf["annotated_image_path"], use_container_width=True)
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("SEVERITY", inf["severity"].upper())
+                m2.metric("CONFIDENCE", f"{inf['confidence']:.2f}")
+                m3.metric("PLATE_OCR", inf["detected_plate"] or "NONE")
+
+                st.code(
+                    f"INCIDENT_ID: #{outcome['incident_id']}  |  SECTOR: {chosen_zone['zone_code']}\n"
+                    f"SUMMARY:     {inf['summary']}\n"
+                    f"ACTION:      {inf.get('recommended_action', 'N/A')}",
+                    language="yaml",
+                )
 
                 if outcome["registered_vehicle_info"]:
                     rv = outcome["registered_vehicle_info"]
-                    st.info(
-                        f"**Registered CSMSS Owner Identified:** {rv['owner_name']} "
-                        f"({rv['owner_role'].upper()} - {rv['department']}) | Pass: `{rv['pass_sticker_id']}`"
+                    st.caption(
+                        f"WHITELIST_MATCH // OWNER: {rv['owner_name']} ({rv['owner_role'].upper()} - {rv['department']}) "
+                        f"| PASS: {rv['pass_sticker_id']} | TEL: {rv['contact_phone']}"
                     )
                 elif inf["detected_plate"]:
-                    st.error(
-                        f"**UNREGISTERED OUTSIDER VEHICLE:** Plate `{inf['detected_plate']}` is NOT "
-                        f"in the CSMSS authorized vehicle registry!"
+                    st.caption(
+                        f"SECURITY_ALERT // PLATE {inf['detected_plate']} NOT FOUND IN AUTHORIZED REGISTRY"
                     )
-
-                if inf.get("recommended_action"):
-                    st.warning(f"**Recommended Action:** {inf['recommended_action']}")
         elif chosen_bytes:
-            st.image(chosen_bytes, caption="Selected Input Frame (Ready for Analysis)", use_container_width=True)
+            st.image(chosen_bytes, use_container_width=True)
+            st.caption(f"READY // SOURCE_FRAME: {chosen_filename} | SECTOR_WEIGHT: {chosen_zone['criticality_weight']}x")
         else:
-            st.info("Select a CSMSS test image or upload a photo on the left to run real-time detection.")
+            st.caption("AWAITING_INPUT // Select a pre-loaded CCTV frame or upload an image.")
 
 
 # =============================================================================
-# VIEW 2: SECURITY & ESTATE OFFICE COMMAND CENTER
+# TAB 2: GEOSPATIAL COMMAND & TRIAGE
 # =============================================================================
-elif persona_mode == "🚨 Security & Estate Command Center":
-    st.title("🚨 CSMSS Security & Civil Estate Command Center")
-    st.write(
-        "Real-time geospatial incident heatmap across **CSMSS Kanchanwadi Campus** (`19.8162° N, 75.2914° E`), "
-        "prioritized hazard queue, and administrative resolution workflow."
-    )
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Logged Incidents", analytics["total_incidents"])
-    k2.metric("Pending Action (Open)", analytics["active_open_incidents"])
-    k3.metric("Resolved & Verified", analytics["resolved_incidents"])
-    k4.metric("Outsider Vehicle Alerts", analytics["unauthorized_outsider_flags"])
-
+with tab_command:
     all_incidents = list_incidents()
-
-    col_map, col_queue = st.columns([1.15, 1.0], gap="large")
+    col_map, col_queue = st.columns([1.05, 1.0], gap="medium")
 
     with col_map:
-        st.subheader("📍 CSMSS Kanchanwadi Geospatial Incident Map")
+        st.markdown('<div class="sec-label">02.A // KANCHANWADI SECTOR GEOSPATIAL TELEMETRY</div>', unsafe_allow_html=True)
         if all_incidents:
             map_df = pd.DataFrame(all_incidents)[
                 ["latitude", "longitude", "zone_name", "incident_type", "severity", "status"]
-            ]
-            st.map(map_df, latitude="latitude", longitude="longitude", size=35)
+            ].copy()
+            # Calibrated compact point radius (14m) so markers remain sharp on mobile & desktop
+            st.map(map_df, latitude="latitude", longitude="longitude", size=14, zoom=16)
         else:
-            st.info("No geo-tagged incidents available yet.")
+            st.caption("No geo-tagged incidents logged.")
 
-        st.subheader("📊 Incident Breakdown by Campus Zone")
+        st.markdown('<div class="sec-label">02.B // SECTOR DENSITY MATRIX</div>', unsafe_allow_html=True)
         zone_summary_df = pd.DataFrame(analytics["zone_heatmap_summary"])
-        st.dataframe(zone_summary_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            zone_summary_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "zone_name": "Campus Sector",
+                "latitude": st.column_config.NumberColumn("Lat", format="%.4f"),
+                "longitude": st.column_config.NumberColumn("Lon", format="%.4f"),
+                "incident_count": "Events",
+            },
+        )
 
     with col_queue:
-        st.subheader("🛠️ Admin Resolution & Dispatch Workflow")
-        filter_status = st.selectbox("Filter Queue by Status:", ["All", "Open", "In_Progress", "Resolved", "Dismissed"])
+        st.markdown('<div class="sec-label">02.C // INCIDENT TRIAGE &amp; RESOLUTION DISPATCH</div>', unsafe_allow_html=True)
+        filter_status = st.selectbox("Filter Queue by Status", ["All", "Open", "In_Progress", "Resolved", "Dismissed"])
         filtered_inc = [
             inc for inc in all_incidents if filter_status == "All" or inc["status"] == filter_status
         ]
 
         if filtered_inc:
             inc_options = {
-                f"#{inc['incident_id']} [{inc['severity']}] {inc['incident_type']} @ {inc['zone_name']} ({inc['status']})": inc
+                f"ID #{inc['incident_id']}  |  {inc['severity'].upper()}  |  {inc['incident_type'].upper()}  |  {inc['zone_code']}": inc
                 for inc in filtered_inc
             }
-            selected_inc_label = st.selectbox("Select Incident to Inspect / Resolve:", list(inc_options.keys()))
+            selected_inc_label = st.selectbox("Select Event Record", list(inc_options.keys()))
             active_inc = inc_options[selected_inc_label]
-
-            st.markdown(f"**Summary:** {active_inc['description']}")
-            st.caption(
-                f"Reported by: {active_inc['reporter_name']} ({active_inc['reporter_role']}) | "
-                f"Confidence: {int(active_inc['confidence_score'] * 100)}% | Created: {active_inc['created_at']}"
-            )
-
-            if active_inc.get("estimated_diameter_cm"):
-                st.warning(
-                    f"**Civil Defect Metrics:** {active_inc['defect_category']} | "
-                    f"Est. Span: `{active_inc['estimated_diameter_cm']} cm` | "
-                    f"Action: {active_inc['recommended_action']}"
-                )
 
             if os.path.exists(active_inc["image_path"]):
                 st.image(active_inc["image_path"], use_container_width=True)
 
-            new_status = st.selectbox(
-                "Update Workflow Status:",
-                options=["Open", "In_Progress", "Resolved", "Dismissed"],
-                index=["Open", "In_Progress", "Resolved", "Dismissed"].index(active_inc["status"]),
+            st.code(
+                f"EVENT_ID:   #{active_inc['incident_id']} [{active_inc['status'].upper()}]\n"
+                f"TIMESTAMP:  {active_inc['created_at']}\n"
+                f"SECTOR:     {active_inc['zone_code']} ({active_inc['zone_name']})\n"
+                f"CONFIDENCE: {active_inc['confidence_score']:.2f}  |  PLATE: {active_inc['detected_plate'] or 'N/A'}\n"
+                f"DETAIL:     {active_inc['description']}",
+                language="yaml",
             )
-            res_notes = st.text_input(
-                "Official Resolution / Security Action Notes:",
-                value=active_inc.get("resolution_notes") or "Cleared obstruction / Work order issued to Civil Cell.",
-            )
-            if st.button("💾 Save Resolution Update", type="primary"):
+
+            if active_inc.get("estimated_diameter_cm"):
+                st.caption(
+                    f"CIVIL_SPEC // DEFECT: {active_inc['defect_category']} | "
+                    f"EST_SPAN: {active_inc['estimated_diameter_cm']} cm | "
+                    f"RECOMMENDED: {active_inc['recommended_action']}"
+                )
+
+            c_u1, c_u2 = st.columns([1, 2])
+            with c_u1:
+                new_status = st.selectbox(
+                    "Set Status",
+                    options=["Open", "In_Progress", "Resolved", "Dismissed"],
+                    index=["Open", "In_Progress", "Resolved", "Dismissed"].index(active_inc["status"]),
+                )
+            with c_u2:
+                res_notes = st.text_input(
+                    "Resolution Log Note",
+                    value=active_inc.get("resolution_notes") or "Obstruction cleared / Civil work order dispatched.",
+                )
+
+            if st.button("COMMIT STATUS UPDATE", type="primary", use_container_width=True):
                 update_incident_status(
                     active_inc["incident_id"],
                     IncidentStatusUpdate(status=new_status, resolution_notes=res_notes),
                 )
-                st.success(f"Incident #{active_inc['incident_id']} updated to **{new_status}**!")
                 st.rerun()
 
-    st.subheader("📑 Master Geo-Tagged Audit Log (Exportable for CIP Report)")
+    st.markdown('<div class="sec-label">02.D // MASTER GEO-TAGGED AUDIT LOG</div>', unsafe_allow_html=True)
     if all_incidents:
         export_df = pd.DataFrame(all_incidents)
         st.dataframe(
             export_df[
                 [
                     "incident_id",
+                    "created_at",
+                    "zone_code",
                     "incident_type",
-                    "zone_name",
                     "severity",
                     "status",
                     "detected_plate",
-                    "is_authorized_vehicle",
                     "confidence_score",
                     "description",
-                    "created_at",
                 ]
             ],
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "incident_id": "ID",
+                "created_at": "Timestamp",
+                "zone_code": "Sector",
+                "incident_type": "Pipeline",
+                "severity": "Severity",
+                "status": "Status",
+                "detected_plate": "Plate",
+                "confidence_score": st.column_config.NumberColumn("Conf", format="%.2f"),
+                "description": "Telemetry Summary",
+            },
         )
         csv_bytes = export_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇️ Download CSMSS Audit Log (CSV)",
+            "EXPORT AUDIT LOG (.CSV)",
             data=csv_bytes,
             file_name="csmss_kanchanwadi_civic_audit.csv",
             mime="text/csv",
@@ -423,42 +602,48 @@ elif persona_mode == "🚨 Security & Estate Command Center":
 
 
 # =============================================================================
-# VIEW 3: GATE ANPR & AUTHORIZED VEHICLE REGISTRY
+# TAB 3: ANPR GATE REGISTRY & WHITELIST
 # =============================================================================
-else:
-    st.title("🚗 CSMSS Main Gate ANPR & Vehicle Whitelist Registry")
-    st.write(
-        "Cross-verify entering vehicles against the authorized **Student, Faculty, College Bus, and "
-        "Ayurveda Hospital Ambulance** database."
-    )
-
-    col_verify, col_reg = st.columns([1.0, 1.2], gap="large")
+with tab_anpr:
+    col_verify, col_reg = st.columns([1.0, 1.35], gap="medium")
 
     with col_verify:
-        st.subheader("🔎 Instant Plate Lookup (Gate Security Desk)")
-        query_plate = st.text_input("Enter or Scan License Plate Number:", value="MH20EE4512")
-        if st.button("Verify Plate Authorization", type="primary"):
+        st.markdown('<div class="sec-label">03.A // INSTANT RTO PLATE VERIFIER</div>', unsafe_allow_html=True)
+        query_plate = st.text_input("Query Registration Number", value="MH20EE4512")
+        if st.button("VERIFY AUTHORIZATION", type="primary", use_container_width=True):
             result = verify_vehicle_plate(query_plate)
             if result["is_authorized"]:
                 v = result["vehicle_details"]
-                st.success(f"✅ AUTHORIZED: `{result['plate_number']}`")
-                st.json(v)
+                st.code(
+                    f"STATUS:      AUTHORIZED_CSMSS_MEMBER\n"
+                    f"PLATE_NO:    {result['plate_number']}\n"
+                    f"OWNER:       {v['owner_name']} ({v['owner_role'].upper()})\n"
+                    f"DEPARTMENT:  {v['department']}\n"
+                    f"PASS_ID:     {v['pass_sticker_id']}\n"
+                    f"CONTACT:     {v['contact_phone']}",
+                    language="yaml",
+                )
             else:
-                st.error(
-                    f"🚨 UNREGISTERED OUTSIDER: `{result['plate_number']}` is NOT in the CSMSS registry! "
-                    f"Log visitor entry at Main Gate."
+                st.code(
+                    f"STATUS:      UNREGISTERED_OUTSIDER_ALERT\n"
+                    f"PLATE_NO:    {result['plate_number']}\n"
+                    f"DIRECTIVE:   Hold gate barrier; log temporary visitor token.",
+                    language="yaml",
                 )
 
-        st.subheader("➕ Register New Campus Vehicle Pass")
+        st.markdown('<div class="sec-label">03.B // ENROLL NEW CAMPUS VEHICLE PASS</div>', unsafe_allow_html=True)
         with st.form("new_vehicle_form"):
-            p_num = st.text_input("License Plate (e.g., MH20GH7788)")
-            o_name = st.text_input("Student / Faculty Full Name")
-            o_role = st.selectbox("Owner Role", ["student", "faculty", "staff", "college_bus", "ambulance"])
-            dept = st.text_input("Department (e.g., CSE, AI&DS, Mechanical, Civil)")
-            v_type = st.selectbox("Vehicle Type", ["two_wheeler", "four_wheeler", "bus", "emergency"])
-            sticker = st.text_input("CSMSS Pass Sticker ID (e.g., CSMSS-PASS-2026-501)")
-            phone = st.text_input("Contact Phone Number")
-            reg_submit = st.form_submit_button("Register Vehicle in Whitelist")
+            f_c1, f_c2 = st.columns(2)
+            with f_c1:
+                p_num = st.text_input("Plate Number", placeholder="MH20GH7788")
+                o_role = st.selectbox("Role", ["student", "faculty", "staff", "college_bus", "ambulance"])
+                v_type = st.selectbox("Class", ["two_wheeler", "four_wheeler", "bus", "emergency"])
+            with f_c2:
+                o_name = st.text_input("Full Name", placeholder="Rohan Deshmukh")
+                dept = st.text_input("Department", placeholder="CSE / AI&DS / Mech")
+                sticker = st.text_input("Pass Sticker ID", placeholder="CSMSS-PASS-2026-501")
+            phone = st.text_input("Contact Number", placeholder="9823000000")
+            reg_submit = st.form_submit_button("COMMIT TO WHITELIST", use_container_width=True)
 
             if reg_submit and p_num and o_name and sticker:
                 try:
@@ -473,13 +658,35 @@ else:
                             contact_phone=phone,
                         )
                     )
-                    st.success(f"Registered `{p_num}` with pass `{sticker}`!")
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"Registration error: {exc}")
+                    st.error(f"Enrollment error: {exc}")
 
     with col_reg:
-        st.subheader("📋 Authorized CSMSS Vehicle Registry")
+        st.markdown('<div class="sec-label">03.C // AUTHORIZED VEHICLE REGISTRY (SQLITE)</div>', unsafe_allow_html=True)
         vehicles = list_registered_vehicles()
         if vehicles:
-            st.dataframe(pd.DataFrame(vehicles), use_container_width=True, hide_index=True)
+            st.dataframe(
+                pd.DataFrame(vehicles)[
+                    [
+                        "plate_number",
+                        "owner_name",
+                        "owner_role",
+                        "department",
+                        "vehicle_type",
+                        "pass_sticker_id",
+                        "contact_phone",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "plate_number": "Plate No.",
+                    "owner_name": "Registered Owner",
+                    "owner_role": "Role",
+                    "department": "Dept",
+                    "vehicle_type": "Class",
+                    "pass_sticker_id": "Sticker ID",
+                    "contact_phone": "Contact",
+                },
+            )
