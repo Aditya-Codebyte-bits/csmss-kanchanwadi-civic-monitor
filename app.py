@@ -1,56 +1,288 @@
 """
-Module 2: Backend Server & SQLite Persistence Layer (app.py)
-Project: CSMSS Chh. Shahu College of Engineering (Kanchanwadi) Civic Monitoring System
-Course: Community Involved Project (CIP - 150 Marks)
+CSMSS Kanchanwadi Civic & Security Monitoring System — REST API Backend
+Engineered by: Aditya Narendra Bhalerao
+Institution: CSMSS Chh. Shahu College of Engineering, Kanchanwadi, Chhatrapati Sambhajinagar
 
-Description:
-FastAPI backend implementing the 5-table SQLite relational schema:
-  - `users`: Students, faculty, security guards, civil maintenance staff
-  - `campus_zones`: Kanchanwadi campus GPS coordinates, criticality weights & ROI boxes
-  - `registered_vehicles`: Whitelisted student/faculty/bus/ambulance vehicles
-  - `incident_reports`: Master geo-tagged civic & security incident log
-  - `road_damage_logs`: Pothole & surface fracture maintenance extension records
-
-Exposes REST API endpoints (with interactive Swagger UI at `/docs`) and direct
-Python functions for `dashboard.py` (Streamlit Cloud compatible).
+Version: 2.1.0 (High-Priority Upgrade: JWT Auth, RBAC, SQLite WAL Concurrency, Input Validation)
 """
 
-from __future__ import annotations
-
+import base64
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import shutil
 import sqlite3
+import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Security, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 
-from inference import CSMSSInferenceEngine
-
-# Configurable storage directory (uses /tmp fallback if current mount is read-only)
-DATA_DIR = Path(os.environ.get("CSMSS_DATA_DIR", "./data"))
+# ---------------------------------------------------------------------------
+# Configuration & Directory Paths
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("CSMSS_DATA_DIR", BASE_DIR / "data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 ANNOTATED_DIR = DATA_DIR / "annotated"
-DB_PATH = DATA_DIR / "csmss_civic.db"
+DB_PATH = DATA_DIR / "civic_monitor.db"
 
+JWT_SECRET_KEY = os.environ.get("CSMSS_JWT_SECRET", "csmss_kanchanwadi_civic_sec_key_2026_aditya_bhalerao")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24
+MAX_FILE_SIZE_MB = 10
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
 
-# Initialize unified CV engine
-ml_engine = CSMSSInferenceEngine(output_dir=str(ANNOTATED_DIR))
+# ---------------------------------------------------------------------------
+# Cryptographic Helpers (Zero External Dependency JWT & PBKDF2 Hashing)
+# ---------------------------------------------------------------------------
+def _b64_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
+def _b64_decode(data: str) -> bytes:
+    padding = "=" * (4 - (len(data) % 4)) if len(data) % 4 != 0 else ""
+    return base64.urlsafe_b64decode(data + padding)
+
+def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
+    if not salt:
+        salt = secrets.token_hex(16)
+    pwd_bytes = password.encode("utf-8")
+    salt_bytes = salt.encode("utf-8")
+    key = hashlib.pbkdf2_hmac("sha256", pwd_bytes, salt_bytes, 100000)
+    return key.hex(), salt
+
+def verify_password(plain_password: str, password_hash: str, salt: str) -> bool:
+    computed_hash, _ = hash_password(plain_password, salt)
+    return secrets.compare_digest(computed_hash, password_hash)
+
+def create_jwt_token(payload: dict) -> str:
+    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    header_b64 = _b64_encode(json.dumps(header).encode("utf-8"))
+    
+    body = payload.copy()
+    body["exp"] = int(time.time()) + (JWT_EXPIRATION_HOURS * 3600)
+    body["iat"] = int(time.time())
+    body_b64 = _b64_encode(json.dumps(body).encode("utf-8"))
+    
+    signing_input = f"{header_b64}.{body_b64}".encode("utf-8")
+    signature = hmac.new(JWT_SECRET_KEY.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    sig_b64 = _b64_encode(signature)
+    
+    return f"{header_b64}.{body_b64}.{sig_b64}"
+
+def decode_jwt_token(token: str) -> dict:
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token structure")
+    
+    header_b64, body_b64, sig_b64 = parts
+    signing_input = f"{header_b64}.{body_b64}".encode("utf-8")
+    expected_sig = hmac.new(JWT_SECRET_KEY.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    
+    if not secrets.compare_digest(_b64_encode(expected_sig), sig_b64):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token signature")
+    
+    body_json = _b64_decode(body_b64).decode("utf-8")
+    payload = json.loads(body_json)
+    
+    if payload.get("exp", 0) < time.time():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
+    
+    return payload
+
+# ---------------------------------------------------------------------------
+# Database & High-Concurrency Connection Manager (WAL Mode)
+# ---------------------------------------------------------------------------
+@contextmanager
+def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")  # High-concurrency WAL mode
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+    except sqlite3.OperationalError:
+        # Graceful fallback for filesystems without WAL shared memory support
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE;")
+        except Exception:
+            pass
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def init_database() -> None:
+    with get_db_connection() as conn:
+        # 1. Users Table with RBAC
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('admin', 'security', 'student', 'faculty')),
+                department TEXT DEFAULT 'General',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+        """)
+
+        # 2. Campus Zones Table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS campus_zones (
+                zone_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                zone_code TEXT UNIQUE NOT NULL,
+                zone_name TEXT NOT NULL,
+                zone_type TEXT NOT NULL,
+                speed_limit_kmh INTEGER DEFAULT 20,
+                is_restricted INTEGER DEFAULT 0,
+                description TEXT
+            );
+        """)
+
+        # 3. Registered Vehicles (Gate ANPR)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS registered_vehicles (
+                plate_number TEXT PRIMARY KEY,
+                owner_name TEXT NOT NULL,
+                owner_type TEXT NOT NULL,
+                department TEXT NOT NULL,
+                vehicle_type TEXT NOT NULL,
+                registered_at TEXT NOT NULL
+            );
+        """)
+
+        # 4. Civic Incidents Table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS civic_incidents (
+                incident_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                incident_type TEXT NOT NULL,
+                zone_id INTEGER NOT NULL,
+                reported_by_user_id INTEGER,
+                license_plate_detected TEXT,
+                is_registered_vehicle INTEGER DEFAULT 0,
+                violation_confidence REAL DEFAULT 0.0,
+                severity_level TEXT NOT NULL CHECK(severity_level IN ('Low', 'Medium', 'High', 'Critical')),
+                status TEXT NOT NULL DEFAULT 'Open' CHECK(status IN ('Open', 'In Progress', 'Resolved', 'Closed')),
+                description TEXT,
+                confidence_score REAL DEFAULT 0.0,
+                image_path TEXT,
+                annotated_image_path TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (zone_id) REFERENCES campus_zones(zone_id),
+                FOREIGN KEY (reported_by_user_id) REFERENCES users(user_id)
+            );
+        """)
+
+        # 5. Security Logs
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS security_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                zone_id INTEGER,
+                user_id INTEGER,
+                details TEXT,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (zone_id) REFERENCES campus_zones(zone_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+        """)
+
+        # 6. High-Frequency Query B-Tree Indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_status ON civic_incidents(status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_type ON civic_incidents(incident_type);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_severity ON civic_incidents(severity_level);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_created ON civic_incidents(created_at);")
+
+        # Seed initial zones if empty
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM campus_zones;")
+        if cursor.fetchone()[0] == 0:
+            default_zones = [
+                ("ZONE-01", "Workshop Fire Exit & Emergency Lane", "Emergency Lane", 15, 1, "Zero-parking emergency corridor behind Mechanical Workshop"),
+                ("ZONE-02", "CSMSS Hospital Link Road", "Ambulance Path", 20, 1, "Access corridor to CSMSS Ayurvedic Hospital & Dental Wing"),
+                ("ZONE-03", "Main Academic Quadrangle Walkway", "Pedestrian Zone", 10, 1, "Pedestrian plaza strictly closed to vehicular traffic"),
+                ("ZONE-04", "Central Library Parking Bay", "Faculty Bay", 20, 0, "Designated faculty & staff parking sector"),
+                ("ZONE-05", "Campus Main Security Gate 1", "Checkpoint", 15, 0, "Kanchanwadi Main Entrance & ANPR Checkpoint")
+            ]
+            conn.executemany("""
+                INSERT INTO campus_zones (zone_code, zone_name, zone_type, speed_limit_kmh, is_restricted, description)
+                VALUES (?, ?, ?, ?, ?, ?);
+            """, default_zones)
+
+        # Seed default administrative & security users if empty
+        cursor.execute("SELECT COUNT(*) FROM users;")
+        if cursor.fetchone()[0] == 0:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            
+            # Admin: Aditya Narendra Bhalerao / Admin@CSMSS2026
+            admin_pwd, admin_salt = hash_password("Admin@CSMSS2026")
+            # Security: Guard Gate 1 / Guard@CSMSS2026
+            sec_pwd, sec_salt = hash_password("Guard@CSMSS2026")
+            # Student: Student Demo / Student@CSMSS2026
+            stu_pwd, stu_salt = hash_password("Student@CSMSS2026")
+
+            seed_users = [
+                ("aditya.admin", admin_pwd, admin_salt, "Aditya Narendra Bhalerao", "admin", "Engineering & Estate Administration", now_iso),
+                ("guard_gate1", sec_pwd, sec_salt, "CSMSS Security Gate 1", "security", "Campus Security Taskforce", now_iso),
+                ("student_demo", stu_pwd, stu_salt, "CSMSS Student Reporter", "student", "Computer Science & Engineering", now_iso)
+            ]
+            conn.executemany("""
+                INSERT INTO users (username, password_hash, salt, full_name, role, department, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+            """, seed_users)
+
+        # Seed authorized sample vehicles
+        cursor.execute("SELECT COUNT(*) FROM registered_vehicles;")
+        if cursor.fetchone()[0] == 0:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            sample_vehicles = [
+                ("MH20EJ1234", "Dr. S. K. Shinde (Principal)", "Faculty", "Administration", "Car", now_iso),
+                ("MH20DE5678", "Prof. R. M. Kulkarni (HOD CSE)", "Faculty", "Computer Science", "Car", now_iso),
+                ("MH20BY9012", "CSMSS Campus Ambulance 1", "Emergency", "Hospital Cell", "Ambulance", now_iso),
+                ("MH12AB3456", "Estate Maintenance Truck", "Utility", "Campus Maintenance", "Van", now_iso)
+            ]
+            conn.executemany("""
+                INSERT INTO registered_vehicles (plate_number, owner_name, owner_type, department, vehicle_type, registered_at)
+                VALUES (?, ?, ?, ?, ?, ?);
+            """, sample_vehicles)
+
+# ---------------------------------------------------------------------------
+# FastAPI App Initialization & OpenAPI Metadata
+# ---------------------------------------------------------------------------
 app = FastAPI(
-    title="CSMSS Kanchanwadi Smart Civic Monitoring API",
+    title="CSMSS Kanchanwadi Civic & Security Monitoring System",
     description=(
-        "Zero-Cost AI Civic & Security Monitoring Backend for CSMSS Chh. Shahu College "
-        "of Engineering, Kanchanwadi, Chhatrapati Sambhajinagar (CIP 150-Mark Project)."
+        "AI-Powered Civic & Security Monitoring System for CSMSS Chh. Shahu College of Engineering, "
+        "Kanchanwadi, Chhatrapati Sambhajinagar. Engineered by Aditya Narendra Bhalerao.\n\n"
+        "Features JWT authentication, Role-Based Access Control (RBAC), SQLite WAL concurrency, "
+        "and YOLOv8/OpenCV inference hooks."
     ),
-    version="1.0.1",
+    version="2.1.0",
+    contact={
+        "name": "Aditya Narendra Bhalerao",
+        "url": "https://github.com/Aditya-Codebyte-bits/csmss-kanchanwadi-civic-monitor",
+    }
 )
 
 app.add_middleware(
@@ -61,488 +293,159 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
-# -----------------------------------------------------------------------------
-# Database Initialization & Connection Helper
-# -----------------------------------------------------------------------------
-SCHEMA_SQL = """
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = MEMORY;
-PRAGMA synchronous = OFF;
-
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    full_name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('student','faculty','security','admin','civil_cell')),
-    department_or_id TEXT UNIQUE NOT NULL,
-    contact_phone TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS campus_zones (
-    zone_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    zone_code TEXT UNIQUE NOT NULL,
-    zone_name TEXT NOT NULL,
-    latitude REAL NOT NULL,
-    longitude REAL NOT NULL,
-    is_no_parking_zone BOOLEAN DEFAULT 1,
-    criticality_weight REAL DEFAULT 1.0,
-    roi_polygon_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS registered_vehicles (
-    vehicle_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plate_number TEXT UNIQUE NOT NULL,
-    owner_name TEXT NOT NULL,
-    owner_role TEXT NOT NULL CHECK(owner_role IN ('student','faculty','staff','college_bus','ambulance')),
-    department TEXT NOT NULL,
-    vehicle_type TEXT NOT NULL CHECK(vehicle_type IN ('two_wheeler','four_wheeler','bus','emergency')),
-    pass_sticker_id TEXT UNIQUE NOT NULL,
-    contact_phone TEXT,
-    is_active BOOLEAN DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS incident_reports (
-    incident_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    incident_type TEXT NOT NULL CHECK(incident_type IN ('unlawful_parking','road_damage','unauthorized_vehicle')),
-    zone_id INTEGER NOT NULL,
-    reported_by_user_id INTEGER NOT NULL,
-    detected_plate TEXT,
-    is_authorized_vehicle BOOLEAN,
-    confidence_score REAL NOT NULL,
-    severity TEXT NOT NULL CHECK(severity IN ('Low','Medium','High','Critical')),
-    status TEXT NOT NULL CHECK(status IN ('Open','In_Progress','Resolved','Dismissed')) DEFAULT 'Open',
-    image_path TEXT NOT NULL,
-    description TEXT NOT NULL,
-    resolution_notes TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    resolved_at TIMESTAMP,
-    FOREIGN KEY (zone_id) REFERENCES campus_zones(zone_id),
-    FOREIGN KEY (reported_by_user_id) REFERENCES users(user_id)
-);
-
-CREATE TABLE IF NOT EXISTS road_damage_logs (
-    damage_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    incident_id INTEGER NOT NULL UNIQUE,
-    defect_category TEXT NOT NULL CHECK(defect_category IN ('Pothole','Alligator_Crack','Longitudinal_Crack','Waterlogging_Edge_Drop')),
-    bbox_area_ratio REAL NOT NULL,
-    estimated_diameter_cm REAL NOT NULL,
-    recommended_action TEXT NOT NULL,
-    FOREIGN KEY (incident_id) REFERENCES incident_reports(incident_id) ON DELETE CASCADE
-);
-"""
-
-
-def _open_sqlite_conn() -> sqlite3.Connection:
-    """Opens SQLite connection with portable journal settings for local and cloud containers."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = MEMORY;")
-    conn.execute("PRAGMA synchronous = OFF;")
-    return conn
-
-
-def init_db() -> None:
-    """Creates all 5 SQLite tables if they do not already exist."""
-    conn = _open_sqlite_conn()
-    try:
-        conn.executescript(SCHEMA_SQL)
-        conn.commit()
-    finally:
-        conn.close()
-
-
-@contextmanager
-def get_db() -> Generator[sqlite3.Connection, None, None]:
-    """Yields a SQLite connection with dictionary-like Row factory."""
-    init_db()
-    conn = _open_sqlite_conn()
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Pydantic Schemas
-# -----------------------------------------------------------------------------
-class IncidentStatusUpdate(BaseModel):
-    status: str = Field(..., pattern="^(Open|In_Progress|Resolved|Dismissed)$")
-    resolution_notes: str = Field(..., min_length=3)
+# ---------------------------------------------------------------------------
+class UserRegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6)
+    full_name: str = Field(..., min_length=2)
+    role: str = Field("student", regex="^(admin|security|student|faculty)$")
+    department: str = Field("Engineering")
 
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: str
+    username: str
+    full_name: str
+    maker_credit: str = "Aditya Narendra Bhalerao"
 
-class VehicleCreateRequest(BaseModel):
-    plate_number: str
-    owner_name: str
-    owner_role: str = "student"
+class UserProfileResponse(BaseModel):
+    user_id: int
+    username: str
+    full_name: str
+    role: str
     department: str
-    vehicle_type: str = "two_wheeler"
-    pass_sticker_id: str
-    contact_phone: Optional[str] = None
 
+class IncidentStatusUpdateRequest(BaseModel):
+    status: str = Field(..., regex="^(Open|In Progress|Resolved|Closed)$")
+    notes: Optional[str] = None
 
-# -----------------------------------------------------------------------------
-# Helper Functions for Business Logic
-# -----------------------------------------------------------------------------
-def lookup_vehicle(conn: sqlite3.Connection, plate_number: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Checks if a normalized license plate exists in `registered_vehicles`."""
-    if not plate_number or not isinstance(plate_number, str):
-        return None
-    norm = CSMSSInferenceEngine.normalize_indian_plate(plate_number) or plate_number.upper().strip()
-    cur = conn.execute(
-        "SELECT * FROM registered_vehicles WHERE plate_number = ? AND is_active = 1",
-        (norm,),
-    )
-    row = cur.fetchone()
-    return dict(row) if row else None
+# ---------------------------------------------------------------------------
+# Authentication & RBAC Dependencies
+# ---------------------------------------------------------------------------
+def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+    payload = decode_jwt_token(token)
+    username = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing subject identity")
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, username, full_name, role, department, is_active FROM users WHERE username = ?", (username,))
+        user = cursor.fetchone()
+        if not user or not user["is_active"]:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is inactive or not found")
+        return dict(user)
 
+def require_role(allowed_roles: List[str]):
+    def role_checker(current_user: dict = Depends(get_current_user)) -> dict:
+        if current_user["role"] not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Operation requires one of roles: {allowed_roles}. Current role: '{current_user['role']}'"
+            )
+        return current_user
+    return role_checker
 
-def get_zone_or_default(conn: sqlite3.Connection, zone_id: int) -> Dict[str, Any]:
-    """Fetches a campus zone by ID or returns the first available CSMSS zone."""
-    cur = conn.execute("SELECT * FROM campus_zones WHERE zone_id = ?", (int(zone_id),))
-    row = cur.fetchone()
-    if row:
-        return dict(row)
-    cur_any = conn.execute("SELECT * FROM campus_zones ORDER BY zone_id ASC LIMIT 1")
-    fallback = cur_any.fetchone()
-    if fallback:
-        return dict(fallback)
-    raise HTTPException(status_code=404, detail="No campus zones configured. Run seed_and_test.py first.")
+# ---------------------------------------------------------------------------
+# File Upload Validation Utility
+# ---------------------------------------------------------------------------
+def validate_uploaded_image(file: UploadFile) -> None:
+    if file.content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type '{file.content_type}'. Supported image formats: {list(ALLOWED_MIME_TYPES)}"
+        )
+    file.file.seek(0, os.SEEK_END)
+    size_mb = file.file.tell() / (1024 * 1024)
+    file.file.seek(0)
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File size ({size_mb:.2f}MB) exceeds maximum limit of {MAX_FILE_SIZE_MB}MB."
+        )
 
-
-# -----------------------------------------------------------------------------
-# REST API Endpoints (Also directly callable from Streamlit `dashboard.py`)
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# System Startup Event
+# ---------------------------------------------------------------------------
 @app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+def startup_event():
+    init_database()
 
-
-@app.get("/api/v1/health")
-def health_check() -> Dict[str, Any]:
-    """Health and ML engine diagnostic endpoint."""
+# ---------------------------------------------------------------------------
+# Core Public & Attribution Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/credits", tags=["Attribution"])
+def get_credits():
+    """Returns official creator attribution and academic project credits."""
     return {
-        "status": "healthy",
-        "campus": "CSMSS Chh. Shahu College of Engineering, Kanchanwadi",
-        "database_path": str(DB_PATH),
-        "ml_engine_mode": ml_engine.engine_mode,
-        "timestamp": datetime.utcnow().isoformat(),
+        "project": "CSMSS Kanchanwadi Civic & Security Monitoring System",
+        "institution": "CSMSS Chh. Shahu College of Engineering, Kanchanwadi, Chhatrapati Sambhajinagar (Aurangabad), Maharashtra",
+        "maker": "Aditya Narendra Bhalerao",
+        "role": "Lead Architect & Developer",
+        "version": "2.1.0",
+        "academic_purpose": "Community Involved Project (CIP — 150 Marks)",
+        "tech_stack": ["FastAPI", "SQLite WAL", "Streamlit", "YOLOv8", "OpenCV", "EasyOCR"],
+        "repository": "https://github.com/Aditya-Codebyte-bits/csmss-kanchanwadi-civic-monitor"
     }
 
+@app.get("/api/v1/health", tags=["Telemetry"])
+def health_check():
+    return {
+        "status": "online",
+        "system": "CSMSS Kanchanwadi Civic Monitor",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database_engine": "SQLite 3 (WAL mode)",
+        "maker_credit": "Aditya Narendra Bhalerao"
+    }
 
-@app.get("/api/v1/zones")
-def list_campus_zones() -> List[Dict[str, Any]]:
-    """Returns all pre-configured CSMSS Kanchanwadi campus zones and GPS coordinates."""
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM campus_zones ORDER BY zone_id ASC").fetchall()
-        return [dict(r) for r in rows]
-
-
-@app.get("/api/v1/vehicles")
-def list_registered_vehicles(role: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Returns whitelisted CSMSS vehicles.
-    Uses plain `None` default so it works both as a FastAPI route and direct Python call in Streamlit.
-    """
-    clean_role = role if isinstance(role, str) and role.strip() else None
-    with get_db() as conn:
-        if clean_role:
-            rows = conn.execute(
-                "SELECT * FROM registered_vehicles WHERE owner_role = ? ORDER BY vehicle_id DESC",
-                (clean_role,),
-            ).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM registered_vehicles ORDER BY vehicle_id DESC").fetchall()
-        return [dict(r) for r in rows]
-
-
-@app.post("/api/v1/vehicles")
-def register_new_vehicle(payload: VehicleCreateRequest) -> Dict[str, Any]:
-    """Adds a new student or staff vehicle to the authorized CSMSS registry."""
-    norm_plate = CSMSSInferenceEngine.normalize_indian_plate(payload.plate_number) or payload.plate_number.upper()
-    with get_db() as conn:
-        try:
-            cur = conn.execute(
-                """
-                INSERT INTO registered_vehicles
-                (plate_number, owner_name, owner_role, department, vehicle_type, pass_sticker_id, contact_phone)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    norm_plate,
-                    payload.owner_name,
-                    payload.owner_role,
-                    payload.department,
-                    payload.vehicle_type,
-                    payload.pass_sticker_id,
-                    payload.contact_phone,
-                ),
+# ---------------------------------------------------------------------------
+# Auth Endpoints (JWT & RBAC)
+# ---------------------------------------------------------------------------
+@app.post("/api/v1/auth/token", response_model=TokenResponse, tags=["Authentication"])
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, username, password_hash, salt, full_name, role, is_active FROM users WHERE username = ?", (form_data.username,))
+        user = cursor.fetchone()
+        
+        if not user or not verify_password(form_data.password, user["password_hash"], user["salt"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
             )
-            conn.commit()
-            return {"status": "registered", "vehicle_id": cur.lastrowid, "plate_number": norm_plate}
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(status_code=400, detail=f"Vehicle or pass sticker already exists: {exc}")
+        
+        if not user["is_active"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
 
-
-@app.get("/api/v1/vehicles/verify/{plate_number}")
-def verify_vehicle_plate(plate_number: str) -> Dict[str, Any]:
-    """Cross-references a license plate against the authorized CSMSS vehicle registry."""
-    with get_db() as conn:
-        record = lookup_vehicle(conn, plate_number)
-        norm = CSMSSInferenceEngine.normalize_indian_plate(plate_number) or plate_number.upper().strip()
-        if record:
-            return {
-                "plate_number": norm,
-                "is_authorized": True,
-                "classification": "AUTHORIZED_CSMSS_MEMBER",
-                "vehicle_details": record,
-            }
-        return {
-            "plate_number": norm,
-            "is_authorized": False,
-            "classification": "UNREGISTERED_OUTSIDER",
-            "vehicle_details": None,
+        token_payload = {
+            "sub": user["username"],
+            "user_id": user["user_id"],
+            "role": user["role"],
+            "full_name": user["full_name"]
         }
+        token = create_jwt_token(token_payload)
 
-
-@app.post("/api/v1/analyze/{incident_type}")
-async def analyze_and_log_incident(
-    incident_type: str,
-    zone_id: int = Form(1),
-    reported_by_user_id: int = Form(1),
-    hint_plate: Optional[str] = Form(None),
-    user_notes: Optional[str] = Form(None),
-    file: UploadFile = File(...),
-) -> Dict[str, Any]:
-    """
-    Core automated analysis endpoint:
-      1. Saves uploaded campus image frame.
-      2. Runs the requested ML pipeline (`unlawful_parking`, `road_damage`, or `unauthorized_vehicle`).
-      3. Verifies extracted license plate against `registered_vehicles` (if applicable).
-      4. Logs geo-tagged incident into `incident_reports` (and `road_damage_logs` for road defects).
-    """
-    if incident_type not in ("unlawful_parking", "road_damage", "unauthorized_vehicle"):
-        raise HTTPException(status_code=400, detail=f"Unsupported incident_type: {incident_type}")
-
-    safe_filename = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
-    saved_upload_path = UPLOAD_DIR / safe_filename
-    with open(saved_upload_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    with get_db() as conn:
-        zone = get_zone_or_default(conn, zone_id)
-        roi_coords = tuple(json.loads(zone["roi_polygon_json"]))
-        crit_weight = float(zone["criticality_weight"])
-
-        if incident_type == "unlawful_parking":
-            res = ml_engine.detect_unlawful_parking(
-                str(saved_upload_path),
-                roi_normalized=roi_coords,
-                zone_criticality=crit_weight,
-                hint_plate=hint_plate,
-            )
-        elif incident_type == "road_damage":
-            res = ml_engine.detect_road_damage(
-                str(saved_upload_path),
-                zone_criticality=crit_weight,
-            )
-        else:
-            res = ml_engine.extract_license_plate(
-                str(saved_upload_path),
-                hint_plate=hint_plate,
-            )
-
-        vehicle_record = lookup_vehicle(conn, res.detected_plate)
-        is_authorized: Optional[bool] = None
-        if res.detected_plate:
-            is_authorized = bool(vehicle_record is not None)
-            if incident_type == "unauthorized_vehicle":
-                if not is_authorized:
-                    res.severity = "High" if crit_weight < 1.5 else "Critical"
-                    res.summary = (
-                        f"ALERT: Unregistered outsider vehicle ({res.detected_plate}) "
-                        f"detected at {zone['zone_name']}."
-                    )
-                else:
-                    res.severity = "Low"
-                    res.summary = (
-                        f"Authorized {vehicle_record['owner_role']} vehicle ({res.detected_plate}) "
-                        f"owned by {vehicle_record['owner_name']} ({vehicle_record['department']})."
-                    )
-
-        full_description = res.summary
-        if user_notes:
-            full_description = f"{res.summary} | Reporter Note: {user_notes}"
-
-        cur = conn.execute(
-            """
-            INSERT INTO incident_reports
-            (incident_type, zone_id, reported_by_user_id, detected_plate, is_authorized_vehicle,
-             confidence_score, severity, status, image_path, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?)
-            """,
-            (
-                incident_type,
-                zone["zone_id"],
-                reported_by_user_id,
-                res.detected_plate,
-                is_authorized,
-                res.confidence,
-                res.severity,
-                res.annotated_image_path,
-                full_description,
-            ),
+        return TokenResponse(
+            access_token=token,
+            role=user["role"],
+            username=user["username"],
+            full_name=user["full_name"],
+            maker_credit="Aditya Narendra Bhalerao"
         )
-        incident_id = cur.lastrowid
 
-        if incident_type == "road_damage":
-            conn.execute(
-                """
-                INSERT INTO road_damage_logs
-                (incident_id, defect_category, bbox_area_ratio, estimated_diameter_cm, recommended_action)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    incident_id,
-                    res.defect_category or "Pothole",
-                    res.bbox_area_ratio,
-                    res.estimated_diameter_cm,
-                    res.recommended_action or "Inspect road surface.",
-                ),
-            )
-
-        conn.commit()
-
-        return {
-            "incident_id": incident_id,
-            "zone": zone,
-            "inference": res.to_dict(),
-            "is_authorized_vehicle": is_authorized,
-            "registered_vehicle_info": vehicle_record,
-        }
-
-
-@app.get("/api/v1/incidents")
-def list_incidents(
-    incident_type: Optional[str] = None,
-    status: Optional[str] = None,
-    severity: Optional[str] = None,
-    zone_id: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Queries geo-tagged campus incidents joined with zone coordinates, reporter details,
-    registered vehicle lookup, and optional road damage metrics.
-    Uses plain `None` defaults so direct calls from Streamlit `dashboard.py` never pass FastAPI Query objects.
-    """
-    query = """
-        SELECT
-            ir.*,
-            cz.zone_code,
-            cz.zone_name,
-            cz.latitude,
-            cz.longitude,
-            u.full_name AS reporter_name,
-            u.role AS reporter_role,
-            rv.owner_name AS vehicle_owner_name,
-            rv.department AS vehicle_owner_dept,
-            rv.contact_phone AS vehicle_owner_phone,
-            rd.defect_category,
-            rd.bbox_area_ratio,
-            rd.estimated_diameter_cm,
-            rd.recommended_action
-        FROM incident_reports ir
-        JOIN campus_zones cz ON ir.zone_id = cz.zone_id
-        JOIN users u ON ir.reported_by_user_id = u.user_id
-        LEFT JOIN registered_vehicles rv ON ir.detected_plate = rv.plate_number
-        LEFT JOIN road_damage_logs rd ON ir.incident_id = rd.incident_id
-        WHERE 1=1
-    """
-    params: List[Any] = []
-    if isinstance(incident_type, str) and incident_type.strip():
-        query += " AND ir.incident_type = ?"
-        params.append(incident_type.strip())
-    if isinstance(status, str) and status.strip():
-        query += " AND ir.status = ?"
-        params.append(status.strip())
-    if isinstance(severity, str) and severity.strip():
-        query += " AND ir.severity = ?"
-        params.append(severity.strip())
-    if isinstance(zone_id, int):
-        query += " AND ir.zone_id = ?"
-        params.append(zone_id)
-
-    query += " ORDER BY ir.created_at DESC, ir.incident_id DESC"
-
-    with get_db() as conn:
-        rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
-
-
-@app.patch("/api/v1/incidents/{incident_id}/resolve")
-def update_incident_status(incident_id: int, payload: IncidentStatusUpdate) -> Dict[str, Any]:
-    """Admin/Security workflow endpoint to update incident status and record resolution notes."""
-    resolved_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S") if payload.status == "Resolved" else None
-    with get_db() as conn:
-        cur = conn.execute(
-            """
-            UPDATE incident_reports
-            SET status = ?, resolution_notes = ?, resolved_at = COALESCE(?, resolved_at)
-            WHERE incident_id = ?
-            """,
-            (payload.status, payload.resolution_notes, resolved_ts, int(incident_id)),
-        )
-        conn.commit()
-        if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail=f"Incident #{incident_id} not found.")
-        updated = conn.execute(
-            "SELECT * FROM incident_reports WHERE incident_id = ?", (int(incident_id),)
-        ).fetchone()
-        return dict(updated)
-
-
-@app.get("/api/v1/analytics/summary")
-def get_campus_analytics() -> Dict[str, Any]:
-    """Aggregates KPI metrics for the CSMSS Admin Command Center and CIP impact evaluation."""
-    with get_db() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM incident_reports").fetchone()[0]
-        open_cnt = conn.execute(
-            "SELECT COUNT(*) FROM incident_reports WHERE status IN ('Open', 'In_Progress')"
-        ).fetchone()[0]
-        resolved_cnt = conn.execute(
-            "SELECT COUNT(*) FROM incident_reports WHERE status = 'Resolved'"
-        ).fetchone()[0]
-        outsiders = conn.execute(
-            "SELECT COUNT(*) FROM incident_reports WHERE is_authorized_vehicle = 0"
-        ).fetchone()[0]
-
-        by_type = conn.execute(
-            "SELECT incident_type, COUNT(*) as count FROM incident_reports GROUP BY incident_type"
-        ).fetchall()
-
-        by_zone = conn.execute(
-            """
-            SELECT cz.zone_name, cz.latitude, cz.longitude, COUNT(ir.incident_id) as incident_count
-            FROM campus_zones cz
-            LEFT JOIN incident_reports ir ON cz.zone_id = ir.zone_id
-            GROUP BY cz.zone_id
-            ORDER BY incident_count DESC
-            """
-        ).fetchall()
-
-        return {
-            "total_incidents": total,
-            "active_open_incidents": open_cnt,
-            "resolved_incidents": resolved_cnt,
-            "unauthorized_outsider_flags": outsiders,
-            "breakdown_by_type": {row["incident_type"]: row["count"] for row in by_type},
-            "zone_heatmap_summary": [dict(row) for row in by_zone],
-        }
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    init_db()
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+@app.post("/api/v1/auth/register", status_code=status.HTTP_201_CREATED, tags=["Authentication"])
+def register_user(req: UserRegisterRequest):
+    pwd_hash, salt = hash_password(req.password)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_db_connection() as conn:
+            conn.execute("""
+                INSERT INTO users (username, password_hash, salt, full_name, role, department, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+            """, (req.usernam
